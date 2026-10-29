@@ -1,0 +1,82 @@
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 目录元数据
+.directory
+
+# 临时文件
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# 日志文件
+*.log
+
+# 编译产物与构建目录
+**/build/
+build/
+*.o
+*.a
+*.out
+# 在 Windows 上编译的主机端工具
+*.exe
+
+# ESP-IDF 专用构建产物
+*.bin
+*.elf
+*.map
+# 构建目录中生成的烧录参数
+flasher_args.json
+sdkconfig.old
+sdkconfig
+
+# ESP-IDF 依赖
+# 旧版本或手动管理的组件
+/components/.idf/
+**/components/.idf/
+# 新版 ESP-IDF 组件管理器
+managed_components/
+# 工程内安装或引用的 ESP-IDF 工具
+.espressif/
+
+# CMake 生成文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Python 环境文件
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+
+# 虚拟环境目录
+venv/
+.venv/
+env/
+
+# 语言服务器文件
+.clangd/
+.ccls-cache/
+compile_commands.json
+
+# Windows 系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 用户专用配置文件
+*.user
+# 各类工具的工作区文件
+*.workspace
+# Visual Studio 解决方案用户选项与文档状态
+*.suo
+*.sln.docstates
