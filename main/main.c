@@ -29,7 +29,7 @@ typedef struct {
     strain_sensor_reading_t latest; // 显示窗口内最后一组有效读数。
     int raw_min;                    // 整个显示窗口内的单次采样极值。
     int raw_max;
-    uint32_t valid_groups;
+    bool has_reading;               // 窗口内是否至少有一组有效读数。
     uint32_t failed_groups;
     uint32_t overruns;              // 采集任务未能按期进入等待的次数。
     esp_err_t last_error;
@@ -37,30 +37,15 @@ typedef struct {
 
 static const char *TAG = "应变采集";
 
-static strain_sensor_range_t report_window_range(const strain_report_window_t *window)
-{
-    if (window->raw_min == 0 && window->raw_max == 4095) {
-        return STRAIN_RANGE_BOTH_LIMITS;
-    }
-    if (window->raw_min == 0) {
-        return STRAIN_RANGE_LOW_LIMIT;
-    }
-    if (window->raw_max == 4095) {
-        return STRAIN_RANGE_HIGH_LIMIT;
-    }
-    return STRAIN_RANGE_NORMAL;
-}
-
 static bool reading_changed(const strain_sensor_reading_t *current,
                             const strain_sensor_reading_t *previous)
 {
-    // 精确比较实际读数，不设变化阈值；组内极值波动本身不触发重复日志。
+    // 校准参数和分压比例在句柄生命周期内固定，绝对电压由 raw 确定，无需重复比较。
+    // 保留两种变化量比较，重新归零后即使 raw 不变也能输出；不设变化阈值。
+    // 组内极值波动本身不触发重复日志。
     return current->raw != previous->raw ||
            current->voltage_valid != previous->voltage_valid ||
            current->zero_valid != previous->zero_valid ||
-           (current->voltage_valid &&
-            (current->adc_mv != previous->adc_mv ||
-             current->output_mv != previous->output_mv)) ||
            (current->zero_valid && current->delta_raw != previous->delta_raw) ||
            (current->voltage_valid && current->zero_valid &&
             current->delta_output_mv != previous->delta_output_mv);
@@ -125,12 +110,13 @@ static void report_task(void *arg)
             }
             previous_overrun = current_overrun;
         }
-        if (window.valid_groups == 0) {
+        if (!window.has_reading) {
             continue;
         }
 
         // 检查整个显示窗口；持续限幅只提示一次，量程状态改变时再提示。
-        strain_sensor_range_t current_range = report_window_range(&window);
+        strain_sensor_range_t current_range =
+            strain_sensor_range_from_raw(window.raw_min, window.raw_max);
         if (current_range != previous_range) {
             if (current_range == STRAIN_RANGE_NORMAL) {
                 ESP_LOGI(TAG, "最近显示窗口未触及 ADC 端点");
@@ -204,7 +190,7 @@ void app_main(void)
     const TickType_t report_ticks = pdMS_TO_TICKS(STRAIN_REPORT_INTERVAL_MS);
     TickType_t last_wake = xTaskGetTickCount();
     TickType_t last_report = last_wake;
-    strain_report_window_t window = {.raw_min = 4095};
+    strain_report_window_t window = {.raw_min = STRAIN_ADC_MAX_RAW};
     for (;;) {
         strain_sensor_reading_t reading;
         err = strain_sensor_read(sensor, &reading);
@@ -213,7 +199,7 @@ void app_main(void)
             window.last_error = err;
         } else {
             window.latest = reading;
-            ++window.valid_groups;
+            window.has_reading = true;
             if (reading.raw_min < window.raw_min) {
                 window.raw_min = reading.raw_min;
             }
@@ -225,7 +211,7 @@ void app_main(void)
         TickType_t now = xTaskGetTickCount();
         if ((TickType_t)(now - last_report) >= report_ticks) {
             xQueueOverwrite(report_queue, &window);
-            window = (strain_report_window_t){.raw_min = 4095};
+            window = (strain_report_window_t){.raw_min = STRAIN_ADC_MAX_RAW};
             last_report = now;
         }
         if (xTaskDelayUntil(&last_wake, sample_ticks) == pdFALSE) {

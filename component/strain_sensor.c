@@ -11,7 +11,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define STRAIN_ADC_MAX_RAW       4095
 #define STRAIN_MAX_SAMPLES       256
 #define STRAIN_MAX_ZERO_READINGS 1024
 
@@ -27,6 +26,20 @@ struct strain_sensor_context {
     float zero_output_mv;
     bool zero_valid;
 };
+
+strain_sensor_range_t strain_sensor_range_from_raw(int raw_min, int raw_max)
+{
+    if (raw_min == 0 && raw_max == STRAIN_ADC_MAX_RAW) {
+        return STRAIN_RANGE_BOTH_LIMITS;
+    }
+    if (raw_min == 0) {
+        return STRAIN_RANGE_LOW_LIMIT;
+    }
+    if (raw_max == STRAIN_ADC_MAX_RAW) {
+        return STRAIN_RANGE_HIGH_LIMIT;
+    }
+    return STRAIN_RANGE_NORMAL;
+}
 
 esp_err_t strain_sensor_init(const strain_sensor_config_t *config,
                             strain_sensor_handle_t *out_handle)
@@ -141,13 +154,7 @@ esp_err_t strain_sensor_read(strain_sensor_handle_t handle,
     }
     reading.raw = (raw_sum + handle->samples_per_read / 2) / handle->samples_per_read;
     // 端点状态仅用于提示；继续换算，但限幅后的数值不能代表完整信号。
-    if (reading.raw_min == 0 && reading.raw_max == STRAIN_ADC_MAX_RAW) {
-        reading.range = STRAIN_RANGE_BOTH_LIMITS;
-    } else if (reading.raw_min == 0) {
-        reading.range = STRAIN_RANGE_LOW_LIMIT;
-    } else if (reading.raw_max == STRAIN_ADC_MAX_RAW) {
-        reading.range = STRAIN_RANGE_HIGH_LIMIT;
-    }
+    reading.range = strain_sensor_range_from_raw(reading.raw_min, reading.raw_max);
     if (handle->calibration != NULL) {
         esp_err_t err = adc_cali_raw_to_voltage(handle->calibration, reading.raw,
                                                &reading.adc_mv);

@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+#define STRAIN_ADC_MAX_RAW 4095
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,7 +38,10 @@ typedef struct {
     bool zero_valid;             // 已保存参考值，不保证参考值或当前采样未限幅。
 } strain_sensor_reading_t;
 
-// 所有接口应由同一个任务调用；本组件独占所选 ADC1 单元。
+// 按有效的 12 位采样极值判断端点；采样组和显示窗口使用同一规则。
+strain_sensor_range_t strain_sensor_range_from_raw(int raw_min, int raw_max);
+
+// 以下访问传感器句柄的接口应由同一个任务调用；本组件独占所选 ADC1 单元。
 // 芯片校准数据不可用时，仅提供原始计数，不提供电压。
 esp_err_t strain_sensor_init(const strain_sensor_config_t *config,
                             strain_sensor_handle_t *out_handle);
