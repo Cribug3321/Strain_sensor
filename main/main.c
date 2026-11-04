@@ -4,6 +4,8 @@
 #include "freertos/task.h"
 #include "strain_sensor.h"
 
+//******* 左小右大 ******* */
+
 // ESP32-S3 的 GPIO4 对应 ADC1 通道 3，接入前须核对整个输出电压范围。
 #define STRAIN_ADC_GPIO             4
 #define STRAIN_SAMPLES_PER_READ     32
