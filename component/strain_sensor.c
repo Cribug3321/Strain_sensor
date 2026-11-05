@@ -8,6 +8,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -22,6 +23,11 @@ struct strain_sensor_context {
     adc_channel_t channel;
     uint16_t samples_per_read;
     float output_to_adc_ratio;
+    uint32_t filter_time_constant_ms;
+    float filtered_raw;
+    float filtered_output_mv;
+    int64_t last_sample_time_us;
+    bool filter_initialized;
     float zero_raw;
     float zero_output_mv;
     bool zero_valid;
@@ -73,6 +79,7 @@ esp_err_t strain_sensor_init(const strain_sensor_config_t *config,
     handle->channel = channel;
     handle->samples_per_read = config->samples_per_read;
     handle->output_to_adc_ratio = config->output_to_adc_ratio;
+    handle->filter_time_constant_ms = config->filter_time_constant_ms;
 
     const adc_oneshot_unit_init_cfg_t unit_config = {
         .unit_id = unit,
@@ -142,6 +149,7 @@ esp_err_t strain_sensor_read(strain_sensor_handle_t handle,
         int raw;
         esp_err_t err = adc_oneshot_read(handle->adc, handle->channel, &raw);
         if (err != ESP_OK) {
+            handle->filter_initialized = false;
             return err;
         }
         raw_sum += raw;
@@ -152,6 +160,7 @@ esp_err_t strain_sensor_read(strain_sensor_handle_t handle,
             reading.raw_max = raw;
         }
     }
+    reading.raw_mean = (float)raw_sum / handle->samples_per_read;
     reading.raw = (raw_sum + handle->samples_per_read / 2) / handle->samples_per_read;
     // 端点状态仅用于提示；继续换算，但限幅后的数值不能代表完整信号。
     reading.range = strain_sensor_range_from_raw(reading.raw_min, reading.raw_max);
@@ -159,15 +168,44 @@ esp_err_t strain_sensor_read(strain_sensor_handle_t handle,
         esp_err_t err = adc_cali_raw_to_voltage(handle->calibration, reading.raw,
                                                &reading.adc_mv);
         if (err != ESP_OK) {
+            handle->filter_initialized = false;
             return err;
         }
         reading.voltage_valid = true;
         reading.output_mv = reading.adc_mv * handle->output_to_adc_ratio;
     }
+    // 只处理完整且有效的采样组；时间常数控制平滑强度，不控制采样或显示周期。
+    const int64_t sample_time_us = esp_timer_get_time();
+    if (!handle->filter_initialized || handle->filter_time_constant_ms == 0 ||
+        sample_time_us <= handle->last_sample_time_us) {
+        // 首组不从零缓慢爬升；失败后的恢复与成功归零后也从实际新读数开始。
+        handle->filtered_raw = reading.raw_mean;
+        handle->filtered_output_mv = reading.output_mv;
+    } else {
+        const float elapsed_us = (float)(sample_time_us - handle->last_sample_time_us);
+        const float tau_us = 1000.0f * handle->filter_time_constant_ms;
+        const float alpha = -expm1f(-elapsed_us / tau_us);
+        handle->filtered_raw += alpha * (reading.raw_mean - handle->filtered_raw);
+        if (reading.voltage_valid) {
+            // 平滑校准后的电压，不将带小数的平滑计数取整后再次冒充 ADC 测量。
+            handle->filtered_output_mv +=
+                alpha * (reading.output_mv - handle->filtered_output_mv);
+        }
+    }
+    handle->last_sample_time_us = sample_time_us;
+    handle->filter_initialized = true;
+    reading.filtered_raw = handle->filtered_raw;
+    if (reading.voltage_valid) {
+        reading.filtered_output_mv = handle->filtered_output_mv;
+    }
+
     if (handle->zero_valid) {
-        reading.delta_raw = reading.raw - handle->zero_raw;
+        reading.delta_raw = reading.raw_mean - handle->zero_raw;
+        reading.filtered_delta_raw = reading.filtered_raw - handle->zero_raw;
         if (reading.voltage_valid) {
             reading.delta_output_mv = reading.output_mv - handle->zero_output_mv;
+            reading.filtered_delta_output_mv =
+                reading.filtered_output_mv - handle->zero_output_mv;
         }
     }
 
@@ -200,7 +238,7 @@ esp_err_t strain_sensor_zero(strain_sensor_handle_t handle, uint16_t readings,
         if (reading.range != STRAIN_RANGE_NORMAL) {
             endpoint_seen = true;
         }
-        raw_sum += reading.raw;
+        raw_sum += reading.raw_mean;
         adc_mv_sum += reading.adc_mv;
         output_mv_sum += reading.output_mv;
         if (delay_ticks > 0 && i + 1 < readings) {
@@ -212,6 +250,7 @@ esp_err_t strain_sensor_zero(strain_sensor_handle_t handle, uint16_t readings,
     handle->zero_raw = raw_sum / readings;
     handle->zero_output_mv = output_mv_sum / readings;
     handle->zero_valid = true;
+    handle->filter_initialized = false;
     if (endpoint_seen) {
         ESP_LOGW(TAG, "归零采样触及 ADC 的 0 或 4095 端点，已保存参考读数；"
                  "相对变化仅供观察，建议调整硬件后重新归零");

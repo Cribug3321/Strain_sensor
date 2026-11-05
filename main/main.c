@@ -1,3 +1,5 @@
+#include <math.h>
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -20,6 +22,7 @@
 // 100 Hz 是采样组的目标频率，不是 ADC 的硬件上限。
 #define STRAIN_SAMPLE_INTERVAL_MS   10
 #define STRAIN_REPORT_INTERVAL_MS   50
+#define STRAIN_FILTER_TIME_CONSTANT_MS 100
 #define STRAIN_REPORT_STACK_BYTES   4096
 
 _Static_assert(pdMS_TO_TICKS(STRAIN_SAMPLE_INTERVAL_MS) > 0,
@@ -40,39 +43,62 @@ static const char *TAG = "应变采集";
 static bool reading_changed(const strain_sensor_reading_t *current,
                             const strain_sensor_reading_t *previous)
 {
-    // 校准参数和分压比例在句柄生命周期内固定，绝对电压由 raw 确定，无需重复比较。
-    // 保留两种变化量比较，重新归零后即使 raw 不变也能输出；不设变化阈值。
-    // 组内极值波动本身不触发重复日志。
-    return current->raw != previous->raw ||
+    // 原始组均值的任何变化均可触发输出，不以滤波值覆盖或截断原始数据。
+    // 滤波值按日志显示的小数位比较，避免浮点收敛尾数造成不可见的重复输出。
+    // 组内极值波动本身不触发重复日志；端点仍由整个窗口的原始极值独立检查。
+    return current->raw_mean != previous->raw_mean ||
            current->voltage_valid != previous->voltage_valid ||
            current->zero_valid != previous->zero_valid ||
-           (current->zero_valid && current->delta_raw != previous->delta_raw) ||
-           (current->voltage_valid && current->zero_valid &&
-            current->delta_output_mv != previous->delta_output_mv);
+           lroundf(current->filtered_raw * 100.0f) !=
+               lroundf(previous->filtered_raw * 100.0f) ||
+           (current->zero_valid &&
+            (current->delta_raw != previous->delta_raw ||
+             lroundf(current->filtered_delta_raw * 100.0f) !=
+                 lroundf(previous->filtered_delta_raw * 100.0f))) ||
+           (current->voltage_valid &&
+            (lroundf(current->filtered_output_mv * 10.0f) !=
+                 lroundf(previous->filtered_output_mv * 10.0f) ||
+             (current->zero_valid &&
+              (current->delta_output_mv != previous->delta_output_mv ||
+               lroundf(current->filtered_delta_output_mv * 10.0f) !=
+                   lroundf(previous->filtered_delta_output_mv * 10.0f)))));
 }
 
 static void report_reading(const strain_sensor_reading_t *reading)
 {
     if (reading->voltage_valid && reading->zero_valid) {
-        ESP_LOGI(TAG, "原始值=%d [%d..%d]，引脚电压=%d mV，模块输出=%.1f mV，"
-                 "输出变化=%+.1f mV，计数变化=%+.1f",
-                 reading->raw, reading->raw_min, reading->raw_max, reading->adc_mv,
-                 (double)reading->output_mv, (double)reading->delta_output_mv,
-                 (double)reading->delta_raw);
+        ESP_LOGI(TAG, "原始值=%d [%d..%d]，组均值=%.2f，平滑计数=%.2f，"
+                 "引脚电压=%d mV，模块输出=%.1f mV，平滑输出=%.1f mV，"
+                 "输出变化=%+.1f mV，平滑输出变化=%+.1f mV，"
+                 "计数变化=%+.2f，平滑计数变化=%+.2f",
+                 reading->raw, reading->raw_min, reading->raw_max,
+                 (double)reading->raw_mean, (double)reading->filtered_raw,
+                 reading->adc_mv, (double)reading->output_mv,
+                 (double)reading->filtered_output_mv,
+                 (double)reading->delta_output_mv,
+                 (double)reading->filtered_delta_output_mv,
+                 (double)reading->delta_raw, (double)reading->filtered_delta_raw);
     } else if (reading->voltage_valid) {
-        ESP_LOGI(TAG, "原始值=%d [%d..%d]，引脚电压=%d mV，模块输出=%.1f mV，"
+        ESP_LOGI(TAG, "原始值=%d [%d..%d]，组均值=%.2f，平滑计数=%.2f，"
+                 "引脚电压=%d mV，模块输出=%.1f mV，平滑输出=%.1f mV，"
                  "变化量=不可用（尚未归零）",
-                 reading->raw, reading->raw_min, reading->raw_max, reading->adc_mv,
-                 (double)reading->output_mv);
+                 reading->raw, reading->raw_min, reading->raw_max,
+                 (double)reading->raw_mean, (double)reading->filtered_raw,
+                 reading->adc_mv, (double)reading->output_mv,
+                 (double)reading->filtered_output_mv);
     } else if (reading->zero_valid) {
-        ESP_LOGI(TAG, "原始值=%d [%d..%d]，计数变化=%+.1f，"
+        ESP_LOGI(TAG, "原始值=%d [%d..%d]，组均值=%.2f，平滑计数=%.2f，"
+                 "计数变化=%+.2f，平滑计数变化=%+.2f，"
                  "电压=不可用（缺少 ADC 校准）",
                  reading->raw, reading->raw_min, reading->raw_max,
-                 (double)reading->delta_raw);
+                 (double)reading->raw_mean, (double)reading->filtered_raw,
+                 (double)reading->delta_raw, (double)reading->filtered_delta_raw);
     } else {
-        ESP_LOGI(TAG, "原始值=%d [%d..%d]，变化量=不可用（尚未归零），"
+        ESP_LOGI(TAG, "原始值=%d [%d..%d]，组均值=%.2f，平滑计数=%.2f，"
+                 "变化量=不可用（尚未归零），"
                  "电压=不可用（缺少 ADC 校准）",
-                 reading->raw, reading->raw_min, reading->raw_max);
+                 reading->raw, reading->raw_min, reading->raw_max,
+                 (double)reading->raw_mean, (double)reading->filtered_raw);
     }
 }
 
@@ -147,6 +173,7 @@ void app_main(void)
         .gpio_num = STRAIN_ADC_GPIO,
         .samples_per_read = STRAIN_SAMPLES_PER_READ,
         .output_to_adc_ratio = STRAIN_OUTPUT_TO_ADC_RATIO,
+        .filter_time_constant_ms = STRAIN_FILTER_TIME_CONSTANT_MS,
     };
     strain_sensor_handle_t sensor = NULL;
     esp_err_t err = strain_sensor_init(&config, &sensor);
@@ -184,6 +211,9 @@ void app_main(void)
     ESP_LOGI(TAG, "目标每 %d 毫秒采集一组，每组 %d 次平均；读数变化才输出，显示窗口为 %d 毫秒",
              STRAIN_SAMPLE_INTERVAL_MS, STRAIN_SAMPLES_PER_READ,
              STRAIN_REPORT_INTERVAL_MS);
+    ESP_LOGI(TAG, "EMA 时间常数=%d 毫秒，按实际采样时间差逐组更新；"
+             "原始值与平滑值分别显示，平滑会引入响应延迟，小数位不代表测量精度",
+             STRAIN_FILTER_TIME_CONSTANT_MS);
     // ADC 的初始化、归零和读取始终由本任务串行执行；显示任务只接收数据副本。
     vTaskPrioritySet(NULL, tskIDLE_PRIORITY + 2);
     const TickType_t sample_ticks = pdMS_TO_TICKS(STRAIN_SAMPLE_INTERVAL_MS);
