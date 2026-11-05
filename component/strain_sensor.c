@@ -183,6 +183,7 @@ esp_err_t strain_sensor_zero(strain_sensor_handle_t handle, uint16_t readings,
         return ESP_ERR_INVALID_ARG;
     }
     float raw_sum = 0;
+    float adc_mv_sum = 0;
     float output_mv_sum = 0;
     bool endpoint_seen = false;
     TickType_t delay_ticks = pdMS_TO_TICKS(interval_ms);
@@ -200,6 +201,7 @@ esp_err_t strain_sensor_zero(strain_sensor_handle_t handle, uint16_t readings,
             endpoint_seen = true;
         }
         raw_sum += reading.raw;
+        adc_mv_sum += reading.adc_mv;
         output_mv_sum += reading.output_mv;
         if (delay_ticks > 0 && i + 1 < readings) {
             vTaskDelay(delay_ticks);
@@ -214,8 +216,14 @@ esp_err_t strain_sensor_zero(strain_sensor_handle_t handle, uint16_t readings,
         ESP_LOGW(TAG, "归零采样触及 ADC 的 0 或 4095 端点，已保存参考读数；"
                  "相对变化仅供观察，建议调整硬件后重新归零");
     }
-    ESP_LOGI(TAG, "归零完成：零点原始值=%.1f",
-             (double)handle->zero_raw);
+    if (handle->calibration != NULL) {
+        // 对归零各组的校准电压取平均，与保存的参考值使用同一批读数。
+        ESP_LOGI(TAG, "归零完成：零点原始值=%.1f，零点引脚电压=%.1f mV",
+                 (double)handle->zero_raw, (double)(adc_mv_sum / readings));
+    } else {
+        ESP_LOGI(TAG, "归零完成：零点原始值=%.1f，零点引脚电压=不可用（缺少 ADC 校准）",
+                 (double)handle->zero_raw);
+    }
     return ESP_OK;
 }
 
